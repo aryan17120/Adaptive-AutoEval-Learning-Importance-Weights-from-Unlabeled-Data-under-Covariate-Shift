@@ -1,16 +1,41 @@
-# ProteinGym Data
+# ProteinGym Data Setup
 
-The ProteinGym data files used in this project are not included
-in this repository due to their large size (~1.4 GB).
+## Overview
 
-## Download Instructions
+This project uses the ProteinGym DMS benchmark (SPG1) to evaluate Adaptive AutoEval under fitness-biased labeling.
 
-1. Visit the official ProteinGym website:
-   https://www.proteingym.org/
+The dataset contains:
 
-2. Download the SPG1 DMS dataset:
-   - `SPG1_STRSG_Olson_2014.csv`
-   - `SPG1_STRSG_Olson_2014_zero_shot.csv`
+- Experimental fitness measurements (ground truth)
+- Zero-shot model predictions (synthetic annotator)
 
-3. Place both files in this directory:
-   `data/proteingym/`
+Used in:
+
+```bash
+python scripts/run_extension1_proteingym.py
+```
+
+Download Instructions
+
+Download from the official ProteinGym website:
+
+https://www.proteingym.org/
+
+Required files:
+
+SPG1_STRSG_Olson_2014.csv
+
+SPG1_STRSG_Olson_2014_zero_shot.csv
+
+
+Required Directory Structure:
+
+Place files exactly here:
+
+```bash
+data/proteingym/
+├── SPG1_STRSG_Olson_2014.csv
+├── SPG1_STRSG_Olson_2014_zero_shot.csv
+```
+
+This path is expected by the experiment scripts.
