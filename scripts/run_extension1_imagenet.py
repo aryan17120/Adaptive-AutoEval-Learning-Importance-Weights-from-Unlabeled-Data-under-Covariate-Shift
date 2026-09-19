@@ -9,8 +9,8 @@ Compares 4 estimators:
   (4) Adaptive PPI++ — weighted PPI++ with LEARNED importance weights
 
 Outputs:
-  results/extension1/ext1_results.csv     (updated with oracle columns)
-  results/extension1/ext1_main.png        (updated 4-method figure)
+  results/imagenet/ext1_results.csv     (updated with oracle columns)
+  results/imagenet/ext1_main.png        (updated 4-method figure)
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 # --------------------------------------------------
 PHI_DIR     = "results/phi_imagenet"
 SYN_DIR     = "results/synthetic_imagenet"
-OUT_DIR     = "results/extension1"
+OUT_DIR     = "results/imagenet"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 MODEL_NAMES = ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]

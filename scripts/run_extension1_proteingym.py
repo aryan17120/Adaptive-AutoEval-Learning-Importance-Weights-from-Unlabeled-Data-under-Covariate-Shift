@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # --------------------------------------------------
 DATA_PATH = "data/proteingym/SPG1_STRSG_Olson_2014_zero_shot.csv"
-OUT_DIR   = "results/extension1_proteingym"
+OUT_DIR   = "results/proteingym"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 TARGET_MODELS = {
@@ -121,6 +121,8 @@ if os.path.exists(ESM2_FEAT_PATH):
     _esm2_all = np.load(ESM2_FEAT_PATH)   # shape (len(df), 640)
     feats_pool = _esm2_all[pool_idx]
     FEATURE_SOURCE_PG = "esm2_640d"
+    print(f"  Weight features: ESM-2 embeddings {_esm2_all.shape} "
+          f"from {ESM2_FEAT_PATH}")
 else:
     # Fallback: raw (uncalibrated) model predictions only, no annotator column.
     # Excludes VESPA to remove the direct annotator-feature coupling.

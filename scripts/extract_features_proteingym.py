@@ -1,119 +1,161 @@
 """
 scripts/extract_features_proteingym.py
 ─────────────────────────────────────────────────────────────────────────────
-Extract ESM-2 (650M) 640-d mean-pooled embeddings for all protein
-variants in the SPG1 ProteinGym assay and save to
+Extract ESM-2 mean-pooled sequence embeddings for every variant in the SPG1
+ProteinGym assay:
+
   results/features_proteingym/esm2_embeddings.npy   shape (N_variants, 640)
 
-These replace any setup where the feature matrix includes
-calibrated model scores and the VESPA annotator score. Under that setup the
-discriminator was trained on features that correlate directly with the shift
-variable (fitness Y_norm drives both the selection bias and the annotator
-predictions), making weight estimation circular.
+These features are what the weight-learning classifier consumes. They must
+encode sequence identity without encoding the fitness label: in this assay the
+normalised fitness drives both the selection bias and the VESPA annotator, so
+a feature set built from calibrated model scores lets the discriminator
+separate labeled from unlabeled trivially, inflating measured performance.
 
-The ESM-2 640-d sequence embedding provides a representation that encodes
-protein sequence information independently of the fitness label, breaking
-the circular coupling.
+WHY THE VARIABLE WINDOW, NOT THE FULL CONSTRUCT
+───────────────────────────────────────────────
+Every `mutated_sequence` in this assay is 448 residues, and every variant
+carries one or two substitutions confined to a narrow window (positions
+228-282 for SPG1). The remaining ~390 residues are byte-identical across all
+536,962 variants.
+
+Mean-pooling a 448-residue embedding would therefore average two changed
+residues against ~446 constant ones, leaving variant-to-variant differences
+near the numerical noise floor. Restricting the encoder to the variable window
+(plus a flank) keeps all of the variant-discriminating signal, removes a
+constant offset that carries none, and is ~6x cheaper. The window is derived
+from the data, not hard-coded -- see `variable_window()`.
+
+MODEL
+─────
+Default `esm2_t30_150M_UR50D`, whose representation dimension is 640 and which
+therefore matches the documented output shape. `--model` accepts any fair-esm
+checkpoint; note that `esm2_t33_650M_UR50D` emits 1280-d, not 640-d.
 
 USAGE
 ─────
-  # From SRC/ directory:
   python scripts/extract_features_proteingym.py \\
       --csv_path data/proteingym/SPG1_STRSG_Olson_2014_zero_shot.csv \\
-      --out_dir  results/features_proteingym \\
-      [--batch_size 64] [--device cuda]
+      [--out_dir results/features_proteingym] \\
+      [--model esm2_t30_150M_UR50D] \\
+      [--batch_size 128] [--device cuda] [--fp16] [--limit N]
 
 REQUIREMENTS
 ────────────
   pip install fair-esm torch
-  Or: pip install esm  (newer API)
 
 OUTPUT
 ──────
   results/features_proteingym/esm2_embeddings.npy
-    float32 array, shape (N_variants, 640)
-    Row i corresponds to row i of the filtered (non-NaN) SPG1 CSV,
-    matching the pool_idx indexing used in run_extension1_proteingym.py.
-
-NOTE
-────
-For SPG1 with 536,962 variants, embedding extraction is compute-intensive.
-A single A100 GPU requires approximately 2-4 hours.
-Alternatively, pre-computed ESM-2 embeddings for ProteinGym assays are
-available from the ProteinGym repository:
-  https://github.com/OATML-Markslab/ProteinGym
+    float32 array, shape (N_variants, embed_dim)
+    Row i corresponds to row i of the CSV, read in file order, matching the
+    indexing used by scripts/run_extension1_proteingym.py.
 """
 
-import argparse, os
+import argparse
+import os
+import re
+import time
+
 import numpy as np
 import pandas as pd
 
+
+def variable_window(mutants, flank=8):
+    """Infer the mutated-position window from the mutant strings."""
+    lo, hi = None, None
+    for m in mutants:
+        for tok in str(m).split(":"):
+            digits = re.findall(r"\d+", tok)
+            if not digits:
+                continue
+            pos = int(digits[0])
+            lo = pos if lo is None else min(lo, pos)
+            hi = pos if hi is None else max(hi, pos)
+    if lo is None:
+        raise SystemExit("Could not parse any mutated positions.")
+    return lo, hi, flank
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--csv_path",   required=True,
-                        help="Path to SPG1_STRSG_Olson_2014_zero_shot.csv")
-    parser.add_argument("--out_dir",    default="results/features_proteingym")
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--device",     default="cpu")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv_path", required=True)
+    ap.add_argument("--out_dir", default="results/features_proteingym")
+    ap.add_argument("--model", default="esm2_t30_150M_UR50D")
+    ap.add_argument("--batch_size", type=int, default=128)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--fp16", action="store_true",
+                    help="Half precision; roughly 2x faster and halves VRAM")
+    ap.add_argument("--flank", type=int, default=8)
+    ap.add_argument("--limit", type=int, default=None)
+    args = ap.parse_args()
 
     try:
         import torch
         import esm
-    except ImportError:
-        raise ImportError(
-            "fair-esm and torch are required. "
-            "Install with: pip install fair-esm torch\n"
-            "Or see: https://github.com/facebookresearch/esm"
-        )
+    except ImportError as e:
+        raise ImportError("pip install fair-esm torch") from e
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    df = pd.read_csv(args.csv_path, usecols=["mutant", "mutated_sequence"])
+    if args.limit:
+        df = df.iloc[:args.limit]
+    seqs = df["mutated_sequence"].tolist()
+    print(f"Variants: {len(seqs)}   full length: {len(seqs[0])}")
+
+    lo, hi, flank = variable_window(df["mutant"], args.flank)
+    # Mutant positions are 1-indexed into the construct.
+    start = max(0, lo - 1 - flank)
+    stop = min(len(seqs[0]), hi + flank)
+    print(f"Mutated positions {lo}-{hi}; embedding window [{start}:{stop}] "
+          f"= {stop - start} residues")
+    windows = [s[start:stop] for s in seqs]
+
+    n_const = len(set(windows))
+    print(f"Distinct windows: {n_const} / {len(windows)}")
+
     device = torch.device(args.device if torch.cuda.is_available()
                           or args.device == "cpu" else "cpu")
-    print(f"Device: {device}")
+    model, alphabet = getattr(esm.pretrained, args.model)()
+    n_layers = model.num_layers
+    model = model.eval().to(device)
+    if args.fp16 and device.type == "cuda":
+        model = model.half()
+    torch.set_grad_enabled(False)
 
-    print(f"Loading CSV: {args.csv_path} ...")
-    df = pd.read_csv(args.csv_path)
-    df = df.dropna(subset=["DMS_score"]).reset_index(drop=True)
-    print(f"  {len(df)} non-NaN variants")
+    bc = alphabet.get_batch_converter()
+    dim = model.embed_dim
+    print(f"Model {args.model}: {n_layers} layers, {dim}-d, device {device}, "
+          f"fp16={args.fp16 and device.type == 'cuda'}")
 
-    if "mutant_sequence" not in df.columns and "sequence" not in df.columns:
-        raise ValueError(
-            "CSV must have a 'mutant_sequence' or 'sequence' column. "
-            "Check the ProteinGym file format."
-        )
-    seq_col = "mutant_sequence" if "mutant_sequence" in df.columns else "sequence"
-    sequences = df[seq_col].tolist()
+    out = np.empty((len(windows), dim), dtype=np.float32)
+    t0 = time.time()
+    for i in range(0, len(windows), args.batch_size):
+        chunk = windows[i:i + args.batch_size]
+        _, _, toks = bc([(str(j), s) for j, s in enumerate(chunk)])
+        toks = toks.to(device)
+        rep = model(toks, repr_layers=[n_layers])["representations"][n_layers]
+        # Mean-pool over real residues only (drop BOS/EOS and padding).
+        mask = (toks != alphabet.padding_idx)
+        mask[:, 0] = False
+        for r in range(len(chunk)):
+            last = int(mask[r].nonzero()[-1])
+            mask[r, last] = False
+        m = mask.unsqueeze(-1).to(rep.dtype)
+        pooled = (rep * m).sum(1) / m.sum(1).clamp(min=1)
+        out[i:i + len(chunk)] = pooled.float().cpu().numpy()
 
-    print("Loading ESM-2 (650M) model ...")
-    model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
-    model = model.to(device)
-    model.eval()
-    batch_converter = alphabet.get_batch_converter()
+        done = i + len(chunk)
+        if (i // args.batch_size) % 20 == 0 or done == len(windows):
+            el = time.time() - t0
+            rate = done / max(el, 1e-9)
+            print(f"  {done:7d}/{len(windows)}  {rate:7.1f} seq/s  "
+                  f"elapsed {el/60:5.1f}m  eta "
+                  f"{(len(windows)-done)/max(rate,1e-9)/60:5.1f}m", flush=True)
 
-    all_embeddings = []
-    n_batches = (len(sequences) + args.batch_size - 1) // args.batch_size
-    with torch.no_grad():
-        for i in range(n_batches):
-            batch_seqs = sequences[i * args.batch_size:(i + 1) * args.batch_size]
-            data = [(f"seq_{j}", s) for j, s in
-                    enumerate(batch_seqs, start=i * args.batch_size)]
-            _, _, tokens = batch_converter(data)
-            tokens = tokens.to(device)
-            results = model(tokens, repr_layers=[33], return_contacts=False)
-            # Mean-pool over sequence positions (exclude BOS/EOS)
-            emb = results["representations"][33]   # (batch, L+2, 640)
-            emb = emb[:, 1:-1, :].mean(dim=1)      # (batch, 640)
-            all_embeddings.append(emb.cpu().numpy().astype(np.float32))
-            if (i + 1) % 100 == 0:
-                print(f"  Batch {i+1}/{n_batches}  "
-                      f"({min((i+1)*args.batch_size, len(sequences))}/{len(sequences)} variants)")
-
-    embeddings = np.concatenate(all_embeddings, axis=0)   # (N, 640)
-    out_path = os.path.join(args.out_dir, "esm2_embeddings.npy")
-    np.save(out_path, embeddings)
-    print(f"\nSaved: {out_path}  shape={embeddings.shape}  dtype={embeddings.dtype}")
-    print("Run run_extension1_proteingym.py — it will auto-detect and use these features.")
+    os.makedirs(args.out_dir, exist_ok=True)
+    dest = os.path.join(args.out_dir, "esm2_embeddings.npy")
+    np.save(dest, out)
+    print(f"Saved {out.shape} -> {dest}")
 
 
 if __name__ == "__main__":

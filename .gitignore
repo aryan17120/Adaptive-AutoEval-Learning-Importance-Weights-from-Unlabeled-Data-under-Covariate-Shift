@@ -224,3 +224,7 @@ results/phi_imagenet/
 results/synthetic_imagenet/
 results/features_imagenet/
 results/features_proteingym/
+
+# Raw datasets (see data/*/README.md for download instructions)
+data/proteingym/*.csv
+data/imagenet/*.JPEG
