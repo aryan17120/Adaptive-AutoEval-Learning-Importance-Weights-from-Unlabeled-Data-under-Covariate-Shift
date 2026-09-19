@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Raw input arrays and extracted features
+# (see data/*/README.md for download and extraction instructions)
+results/phi_imagenet/
+results/synthetic_imagenet/
+results/features_imagenet/
+results/features_proteingym/

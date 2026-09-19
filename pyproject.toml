@@ -1,10 +1,10 @@
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "adaptive-autoeval"
-version = "0.1.0"
+version = "0.2.0"
 description = "Adaptive AutoEval: Learning Importance Weights for Model Evaluation under Unknown Covariate Shift"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -15,4 +15,13 @@ dependencies = [
     "scipy>=1.7.0",
     "scikit-learn>=0.24.0",
     "matplotlib>=3.4.0",
+]
+
+[tool.setuptools]
+packages = ["adaptive_autoeval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: long-running Monte Carlo tests (deselect with '-m \"not slow\"')",
 ]

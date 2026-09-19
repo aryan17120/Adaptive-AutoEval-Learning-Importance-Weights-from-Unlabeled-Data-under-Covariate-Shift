@@ -113,28 +113,31 @@ def ppi_weighted(
     n = phi_lab.shape[0]
     N = syn_unl.shape[0]
 
-    # Normalize weights to mean 1
+    # Normalize weights to mean 1 (self-normalised Hajek weights)
     w = weights / weights.mean()
 
-    # Apply weights to labeled losses
-    phi_w = w[:, None] * phi_lab if phi_lab.ndim > 1 else w * phi_lab
+    # Broadcast w for multi-model (n, M) inputs
+    w_b = w[:, None] if phi_lab.ndim > 1 else w   # (n,1) or (n,)
 
-    # Weighted covariance for optimal lambda
-    cov_num = np.mean(
-        (phi_w - phi_w.mean(0)) * (syn_lab - syn_lab.mean(0)), axis=0
-    )
-    var_full = (n / N) * syn_unl.var(0) + syn_lab.var(0)
+    # λ* from the weighted moments derived in Appendix B.
+    # Weighted means (Eq. 19)
+    phi_bar_w = (w_b * phi_lab).mean(0)           # (M,) or scalar
+    syn_bar_w = (w_b * syn_lab).mean(0)
+    # Weighted covariance Cov_w(φ, Ê) (Eq. 20)
+    cov_w = (w_b * (phi_lab - phi_bar_w) * (syn_lab - syn_bar_w)).mean(0)
+    # Weighted variance Var_w(Ê) (Eq. 21)
+    var_w = (w_b * (syn_lab - syn_bar_w) ** 2).mean(0)
+    var_unl = syn_unl.var(0)
+    denom = var_w + (n / N) * var_unl
     lambd = np.clip(
-        np.where(var_full > 1e-12, cov_num / var_full, 1.0), 0.0, 1.0
+        np.where(denom > 1e-12, cov_w / denom, 1.0), 0.0, 1.0
     )
 
-    # Weighted PPI++ estimate
-    mu_hat = lambd * syn_unl.mean(0) + (phi_w - lambd * syn_lab).mean(0)
-
-    # Variance: squared weights account for inflation from non-uniform weighting
-    resid = (w[:, None] if phi_lab.ndim > 1 else w) * (
-        phi_lab - lambd * syn_lab
-    )
-    var_hat = resid.var(0) / n + lambd ** 2 * syn_unl.var(0) * (n / N) / n
+    # The weight multiplies the full residual (φ − λÊ). Weighting φ alone
+    # would leave an O(1) bias that does not shrink with n.
+    # var_hat is derived from this same residual expression.
+    resid  = w_b * (phi_lab - lambd * syn_lab)    # shared expression
+    mu_hat = lambd * syn_unl.mean(0) + resid.mean(0)
+    var_hat = resid.var(0) / n + lambd ** 2 * var_unl * (n / N) / n
 
     return mu_hat, var_hat
