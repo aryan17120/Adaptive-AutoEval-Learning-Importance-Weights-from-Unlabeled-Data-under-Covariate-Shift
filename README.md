@@ -1,6 +1,4 @@
 # Adaptive AutoEval: Learning Importance Weights from Unlabeled Data under Covariate Shift
-### Importance-Weighted Model Evaluation under Unknown Covariate Shift
-*Anonymous submission — under review*
 
 ---
 
