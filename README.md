@@ -397,8 +397,7 @@ If you use Adaptive AutoEval in your research, please cite:
   title  = {AutoEval under Unknown Covariate Shift: Learning
             Importance Weights from Unlabeled Data},
   author = {Anonymous},
-  year   = {2026},
-  note   = {Under review}
+  year   = {2026}
 }
 ```
 
