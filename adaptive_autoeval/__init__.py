@@ -40,15 +40,27 @@ For comparison, run the unweighted PPI++ baseline::
 
 See the paper for theoretical guarantees on consistency, asymptotic
 normality, and effective sample size under unknown covariate shift.
+
+Scope of the guarantee
+----------------------
+``ppi_weighted`` reduces bias and MSE relative to classical estimation
+under unknown covariate shift.  It does **not** attain nominal coverage:
+a residual coverage gap remains at every sample size tested.  See
+``results/experiments.md`` for the measured gap on both benchmarks, and
+``variance.sigma_weight_rate`` for why the weight-estimation variance
+term is asymptotically negligible but does not close that gap.
 """
 
 from .estimators import ppi_unweighted, ppi_weighted
 from .weights import learn_importance_weights
+from .variance import bootstrap_variance, sigma_weight_rate
 
 __all__ = [
     "ppi_unweighted",
     "ppi_weighted",
     "learn_importance_weights",
+    "bootstrap_variance",
+    "sigma_weight_rate",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

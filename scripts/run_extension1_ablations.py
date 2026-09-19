@@ -54,8 +54,20 @@ syn_all = np.stack(
     [np.load(os.path.join(SYN_DIR, f"{m}.npy")) for m in MODEL_NAMES], axis=1
 )
 N_total, M = phi_all.shape
-features = syn_all.copy()
 mu_gt    = phi_all.mean(axis=0)
+
+# Weight-estimation features, independent of the shift variable.
+# ResNet-50 penultimate features if available; else the entropy proxy.
+FEAT_PATH = "results/features_imagenet/resnet50_penultimate.npy"
+if os.path.exists(FEAT_PATH):
+    features = np.load(FEAT_PATH)
+    FEATURE_SOURCE = "resnet50_penultimate_2048d"
+else:
+    p_syn = np.clip(syn_all, 1e-7, 1.0)
+    p_syn = p_syn / p_syn.sum(axis=1, keepdims=True)
+    features = -np.sum(p_syn * np.log(p_syn), axis=1, keepdims=True)
+    FEATURE_SOURCE = "softmax_entropy_proxy_1d"
+    print(f"  Using feature proxy: {FEATURE_SOURCE}")
 print(f"Loaded: {N_total} images, {M} models")
 print(f"Ground-truth accuracies: {mu_gt}")
 
@@ -75,16 +87,23 @@ def ppi_estimate(phi_lab, syn_lab, syn_unl):
 
 
 def ppi_estimate_weighted(phi_lab, syn_lab, syn_unl, weights):
+    # Weight the full residual (φ−λÊ); λ* from the Appendix B weighted
+    # moments; var_hat from the same residual as mu_hat.
     n, M = phi_lab.shape; N = syn_unl.shape[0]
-    w = weights / weights.mean()
-    phi_w    = w[:, None] * phi_lab
-    cov_num  = np.mean((phi_w - phi_w.mean(0)) *
-                       (syn_lab - syn_lab.mean(0)), axis=0)
-    var_full = (n / N) * syn_unl.var(0) + syn_lab.var(0)
-    lambd    = np.clip(np.where(var_full > 1e-12, cov_num / var_full, 1.0), 0.0, 1.0)
-    mu_hat   = lambd * syn_unl.mean(0) + (phi_w - lambd * syn_lab).mean(0)
-    resid    = w[:, None] * (phi_lab - lambd * syn_lab)
-    var_hat  = resid.var(0) / n + lambd**2 * syn_unl.var(0) * (n / N) / n
+    w    = weights / weights.mean()
+    wb   = w[:, None]
+    # Appendix B weighted moments
+    phi_bar_w = (wb * phi_lab).mean(0)
+    syn_bar_w = (wb * syn_lab).mean(0)
+    cov_w    = (wb * (phi_lab - phi_bar_w) * (syn_lab - syn_bar_w)).mean(0)
+    var_w    = (wb * (syn_lab - syn_bar_w) ** 2).mean(0)
+    var_unl  = syn_unl.var(0)
+    denom    = var_w + (n / N) * var_unl
+    lambd    = np.clip(np.where(denom > 1e-12, cov_w / denom, 1.0), 0.0, 1.0)
+    # Shared residual
+    resid    = wb * (phi_lab - lambd * syn_lab)
+    mu_hat   = lambd * syn_unl.mean(0) + resid.mean(0)
+    var_hat  = resid.var(0) / n + lambd**2 * var_unl * (n / N) / n
     return mu_hat, var_hat
 
 

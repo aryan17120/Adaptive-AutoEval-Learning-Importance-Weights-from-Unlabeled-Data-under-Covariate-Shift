@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore")
 # CONFIG
 # --------------------------------------------------
 DATA_PATH = "data/proteingym/SPG1_STRSG_Olson_2014_zero_shot.csv"
-OUT_DIR   = "results/extension1_proteingym"
+OUT_DIR   = "results/proteingym"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 TARGET_MODELS = {
@@ -108,12 +108,30 @@ log_p  = BETA_SHIFT * Y_norm
 log_p -= log_p.max()
 p_shift = np.exp(log_p); p_shift /= p_shift.sum()
 
-# Feature matrix for weight learning
-feats_pool = np.hstack([
-    np.column_stack([df[c["col"]].values[pool_idx] for c in calibrations.values()]),
-    df[ANNOTATOR].values[pool_idx].reshape(-1, 1),
-    (ann_cal["alpha"] * df[ANNOTATOR].values[pool_idx] + ann_cal["beta"]).reshape(-1, 1),
-])
+# Weight-estimation features must be independent of the variable that drives
+# the selection bias. Here Y_norm drives both the shift and the annotator, so
+# including the VESPA annotator score would let the discriminator separate
+# labeled from unlabeled trivially, inflating apparent performance.
+#
+# Preferred: ESM-2 640-d embeddings (App. D.2), independent of the fitness
+# direction for the binary labeled/unlabeled task.
+# Fallback: raw (uncalibrated) model scores, less directly tied to fitness.
+ESM2_FEAT_PATH = f"results/features_proteingym/esm2_embeddings.npy"
+if os.path.exists(ESM2_FEAT_PATH):
+    _esm2_all = np.load(ESM2_FEAT_PATH)   # shape (len(df), 640)
+    feats_pool = _esm2_all[pool_idx]
+    FEATURE_SOURCE_PG = "esm2_640d"
+    print(f"  Weight features: ESM-2 embeddings {_esm2_all.shape} "
+          f"from {ESM2_FEAT_PATH}")
+else:
+    # Fallback: raw (uncalibrated) model predictions only, no annotator column.
+    # Excludes VESPA to remove the direct annotator-feature coupling.
+    feats_pool = np.column_stack([
+        df[c["col"]].values[pool_idx] for c in calibrations.values()
+    ])
+    FEATURE_SOURCE_PG = "raw_model_scores_no_annotator"
+    print(f"  ESM-2 embeddings not found. Using fallback features: {FEATURE_SOURCE_PG}")
+    print(f"  Run scripts/extract_features_proteingym.py to generate ESM-2 embeddings.")
 
 # --------------------------------------------------
 # Estimators
@@ -130,15 +148,22 @@ def ppi_unweighted(phi_lab, syn_lab, syn_unl):
 
 
 def ppi_weighted(phi_lab, syn_lab, syn_unl, weights):
+    # Weight the full residual (φ−λÊ); λ* from the Appendix B weighted
+    # moments; var_hat from the same residual as mu_hat.
     n = len(phi_lab); N = len(syn_unl)
     w = weights / weights.mean()
-    phi_w = w * phi_lab
-    cov_num  = ((phi_w - phi_w.mean()) * (syn_lab - syn_lab.mean())).mean()
-    var_full = (n / N) * syn_unl.var() + syn_lab.var()
-    lam      = np.clip(cov_num / (var_full + 1e-12), 0.0, 1.0)
-    mu_hat   = lam * syn_unl.mean() + (phi_w - lam * syn_lab).mean()
+    # Appendix B weighted moments
+    phi_bar_w = (w * phi_lab).mean()
+    syn_bar_w = (w * syn_lab).mean()
+    cov_w    = (w * (phi_lab - phi_bar_w) * (syn_lab - syn_bar_w)).mean()
+    var_w    = (w * (syn_lab - syn_bar_w) ** 2).mean()
+    var_unl  = syn_unl.var()
+    denom    = var_w + (n / N) * var_unl
+    lam      = np.clip(cov_w / (denom + 1e-12), 0.0, 1.0)
+    # Shared residual
     resid    = w * (phi_lab - lam * syn_lab)
-    var_hat  = resid.var() / n + lam**2 * syn_unl.var() * (n / N) / n
+    mu_hat   = lam * syn_unl.mean() + resid.mean()
+    var_hat  = resid.var() / n + lam**2 * var_unl * (n / N) / n
     return mu_hat, var_hat
 
 

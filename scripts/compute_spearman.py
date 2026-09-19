@@ -120,11 +120,16 @@ def ppi_unweighted(phi_lab, syn_lab, syn_unl):
 def ppi_weighted(phi_lab, syn_lab, syn_unl, weights):
     n = len(phi_lab); N = len(syn_unl)
     w = weights / weights.mean()
-    phi_w    = w * phi_lab
-    cov_num  = ((phi_w - phi_w.mean()) * (syn_lab - syn_lab.mean())).mean()
-    var_full = (n / N) * syn_unl.var() + syn_lab.var()
-    lam      = np.clip(cov_num / (var_full + 1e-12), 0.0, 1.0)
-    return lam * syn_unl.mean() + (phi_w - lam * syn_lab).mean()
+    # Appendix B weighted moments
+    phi_bar_w = (w * phi_lab).mean()
+    syn_bar_w = (w * syn_lab).mean()
+    cov_w    = (w * (phi_lab - phi_bar_w) * (syn_lab - syn_bar_w)).mean()
+    var_w    = (w * (syn_lab - syn_bar_w) ** 2).mean()
+    var_unl  = syn_unl.var()
+    denom    = var_w + (n / N) * var_unl
+    lam      = np.clip(cov_w / (denom + 1e-12), 0.0, 1.0)
+    # Weight the full residual (φ − λÊ)
+    return lam * syn_unl.mean() + (w * (phi_lab - lam * syn_lab)).mean()
 
 
 def learn_weights(feat_lab, feat_unl):

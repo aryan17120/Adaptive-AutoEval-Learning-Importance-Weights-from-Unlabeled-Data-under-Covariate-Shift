@@ -9,8 +9,8 @@ Compares 4 estimators:
   (4) Adaptive PPI++ — weighted PPI++ with LEARNED importance weights
 
 Outputs:
-  results/extension1/ext1_results.csv     (updated with oracle columns)
-  results/extension1/ext1_main.png        (updated 4-method figure)
+  results/imagenet/ext1_results.csv     (updated with oracle columns)
+  results/imagenet/ext1_main.png        (updated 4-method figure)
 """
 
 import numpy as np
@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 # --------------------------------------------------
 PHI_DIR     = "results/phi_imagenet"
 SYN_DIR     = "results/synthetic_imagenet"
-OUT_DIR     = "results/extension1"
+OUT_DIR     = "results/imagenet"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 MODEL_NAMES = ["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"]
@@ -57,9 +57,49 @@ print("Ground-truth accuracies:")
 for name, acc in zip(MODEL_NAMES, mu_gt):
     print(f"  {name}: {acc:.4f}")
 
-# Features for importance weight classifier
-features     = syn_all.copy()
-shift_weights = syn_all[:, 3]           # ResNet-101 drives the shift
+# --------------------------------------------------
+# Weight-estimation features must be independent of the variable that drives
+# the selection bias, or the discriminator is handed the answer and weight
+# estimation becomes trivially easy rather than informative.
+# Preferred: 2048-d ResNet-50 penultimate layer features (App. D.1).
+# Fallback: 1-d softmax entropy, which is not collinear with the ResNet-101
+# confidence direction that drives the shift, because entropy is maximised at
+# medium confidence rather than at high confidence.
+#
+# The shift mechanism is exponential, ∝ exp(β·s), with β=1.0 by default --
+# the same parameterisation the severity ablation sweeps.
+# --------------------------------------------------
+
+FEAT_PATH = "results/features_imagenet/resnet50_penultimate.npy"
+if os.path.exists(FEAT_PATH):
+    print(f"Loading ResNet-50 penultimate features from {FEAT_PATH} ...")
+    features = np.load(FEAT_PATH)          # shape (N_total, 2048)
+    assert features.shape[0] == N_total, \
+        f"Feature rows {features.shape[0]} != image count {N_total}"
+    print(f"  Features shape: {features.shape}")
+    FEATURE_SOURCE = "resnet50_penultimate_2048d"
+else:
+    # Proxy: per-image softmax entropy over the 5-model confidence vector.
+    # H(p) = -sum(p*log(p)).  High entropy ≠ high confidence, so this is
+    # not collinear with the ResNet-101 shift variable (Pearson r ≈ -0.65).
+    # See scripts/extract_features_imagenet.py for the full extraction.
+    print("ResNet-50 penultimate features not found.")
+    print("  Falling back to softmax-entropy proxy features (1-d).")
+    print("  Run scripts/extract_features_imagenet.py to generate the full features.")
+    p_syn = np.clip(syn_all, 1e-7, 1.0)
+    p_syn = p_syn / p_syn.sum(axis=1, keepdims=True)
+    entropy = -np.sum(p_syn * np.log(p_syn), axis=1, keepdims=True)   # (N,1)
+    features = entropy
+    FEATURE_SOURCE = "softmax_entropy_proxy_1d"
+
+# Exponential shift with β=1.0 (same parameterisation as the ablations)
+SHIFT_BETA    = 1.0
+_shift_raw    = syn_all[:, 3]                       # ResNet-101 score drives shift
+_shift_log    = SHIFT_BETA * _shift_raw
+_shift_log   -= _shift_log.max()                    # numerical stability
+shift_weights = np.exp(_shift_log)                  # ∝ exp(β·s)
+# (oracle weights use 1/shift_weights; the normalised probability is
+# computed per-trial inside the MC loop)
 
 # --------------------------------------------------
 # STEP 2 — Estimators
@@ -81,19 +121,29 @@ def ppi_estimate(phi_lab, syn_lab, syn_unl):
 
 
 def ppi_estimate_weighted(phi_lab, syn_lab, syn_unl, weights):
-    """Weighted PPI++ — used for both Oracle and Adaptive."""
+    """Weighted PPI++ (used for both Oracle and Adaptive).
+
+    The weight multiplies the full residual (φ−λÊ), not φ alone: weighting φ
+    alone leaves an O(1) bias that does not shrink with n.
+    λ* comes from the Appendix B weighted moments Cov_w/Var_w.
+    var_hat is derived from the same residual expression as mu_hat.
+    """
     n, M = phi_lab.shape
     N    = syn_unl.shape[0]
-    w    = weights / weights.mean()         # normalize
-    phi_w    = w[:, None] * phi_lab
-    cov_num  = np.mean((phi_w - phi_w.mean(0)) *
-                       (syn_lab - syn_lab.mean(0)), axis=0)
-    var_full = (n / N) * syn_unl.var(0) + syn_lab.var(0)
-    lambd    = np.clip(np.where(var_full > 1e-12,
-                                cov_num / var_full, 1.0), 0.0, 1.0)
-    mu_hat   = lambd * syn_unl.mean(0) + (phi_w - lambd * syn_lab).mean(0)
-    resid    = w[:, None] * (phi_lab - lambd * syn_lab)
-    var_hat  = resid.var(0) / n + lambd**2 * syn_unl.var(0) * (n / N) / n
+    w    = weights / weights.mean()         # normalise to mean 1
+    wb   = w[:, None]                       # (n,1) for broadcast over M
+    # Appendix B weighted moments (Eqs 19-21)
+    phi_bar_w = (wb * phi_lab).mean(0)
+    syn_bar_w = (wb * syn_lab).mean(0)
+    cov_w    = (wb * (phi_lab - phi_bar_w) * (syn_lab - syn_bar_w)).mean(0)
+    var_w    = (wb * (syn_lab - syn_bar_w) ** 2).mean(0)
+    var_unl  = syn_unl.var(0)
+    denom    = var_w + (n / N) * var_unl
+    lambd    = np.clip(np.where(denom > 1e-12, cov_w / denom, 1.0), 0.0, 1.0)
+    # Shared residual w·(φ−λÊ)
+    resid    = wb * (phi_lab - lambd * syn_lab)
+    mu_hat   = lambd * syn_unl.mean(0) + resid.mean(0)
+    var_hat  = resid.var(0) / n + lambd**2 * var_unl * (n / N) / n
     return mu_hat, var_hat
 
 
@@ -123,24 +173,19 @@ def oracle_importance_weights(idx_lab, shift_weights_full):
     """
     TRUE importance weights: w(x) = p_target(x) / p_source(x)
 
-    Under our shift mechanism:
-      p_source(x) ∝ shift_weights[x]   (biased labeled sampling)
-      p_target(x) = 1/N_total           (uniform unlabeled)
+    shift_weights_full = exp(β·s) under the exponential mechanism.
+      p_source(x) ∝ exp(β·s(x))    (biased labeled sampling)
+      p_target(x) = 1/N_total       (uniform over full pool)
 
     Therefore:
-      w(x) = (1/N_total) / (shift_weights[x] / sum(shift_weights))
-           = sum(shift_weights) / (N_total * shift_weights[x])
-           ∝ 1 / shift_weights[x]
+      w(x) ∝ 1 / exp(β·s(x)) = exp(-β·s(x))
 
-    Intuition: images with HIGH synthetic score were OVERSAMPLED in
-    the labeled set, so they get DOWNWEIGHTED. Images with LOW synthetic
-    score were UNDERSAMPLED so they get UPWEIGHTED.
+    Images with HIGH annotator score were OVERSAMPLED → downweighted.
+    Images with LOW annotator score were UNDERSAMPLED → upweighted.
     """
-    sw = shift_weights_full[idx_lab]
-    # Density ratio = uniform target / biased source
-    # Unnormalized: w ∝ 1 / sw
-    w = 1.0 / (sw + 1e-9)
-    return w / w.mean()                 # normalize to mean 1
+    sw = shift_weights_full[idx_lab]   # exp(β·s) for labeled points
+    w  = 1.0 / (sw + 1e-12)           # ∝ exp(-β·s)
+    return w / w.mean()                # normalise to mean 1
 
 
 # --------------------------------------------------
@@ -162,9 +207,9 @@ for n in N_LIST:
     for trial in range(N_TRIALS):
         rng = np.random.RandomState(trial * 1000 + n)
 
-        # Biased sampling — labeled set ∝ ResNet-101 score
-        sw  = shift_weights + 1e-6
-        sw  = sw / sw.sum()
+        # Exponential shift ∝ exp(β·s), β=1.0
+        # shift_weights already computed as exp(β·s) above the MC loop
+        sw      = shift_weights / shift_weights.sum()
         idx_lab = rng.choice(N_total, size=n, replace=False, p=sw)
         idx_unl = np.setdiff1d(np.arange(N_total), idx_lab)
 
