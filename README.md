@@ -1,4 +1,4 @@
-# Adaptive AutoEval: Learning Importance Weights from Unlabeled Data under Covariate Shift
+# AdaEval: Adaptive Importance Weighting for Reliable Model Evaluation under Unknown Covariate Shift
 
 ---
 
